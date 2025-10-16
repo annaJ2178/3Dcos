@@ -115,6 +115,66 @@ predict2_video2world_training_2b_groot_gr1_480 = dict(
     model_parallel=dict(
         context_parallel_size=1,
     ),
+    model=dict(
+        config=dict(
+            min_num_conditional_frames=0,
+            max_num_conditional_frames=2,
+            conditional_frames_probs={0: 0.5, 1: 0.25, 2: 0.25},
+            loss_scale=10.0,
+            adjust_video_noise=False,
+            scaling="rectified_flow",
+            sigma_data=1.0,
+            fsdp_shard_size=1,
+            resolution="720",
+            state_t=2,
+            resize_online=True,
+            high_sigma_strategy=str(HighSigmaStrategy.LOGUNIFORM200_100000),
+            high_sigma_ratio=0.05,
+            rectified_flow_loss_weight_uniform=False,
+            net=dict(
+                rope_enable_fps_modulation=False,
+                rope_h_extrapolation_ratio=3.0,
+                rope_w_extrapolation_ratio=3.0,
+                rope_t_extrapolation_ratio=24.0 / 24,
+                sac_config=dict(
+                    mode="predict2_2b_720_aggressive",
+                ),
+                use_crossattn_projection=True,
+                crossattn_proj_in_channels=100352,
+                crossattn_emb_channels=1024,
+            ),
+            conditioner=dict(
+                use_video_condition=dict(
+                    dropout_rate=0.0,
+                ),
+                text=dict(
+                    dropout_rate=0.2,
+                    use_empty_string=False,
+                ),
+            ),
+            sde=dict(
+                p_mean=1.6094379124341003,  # math.log(5.0)
+                p_std=1.0,
+                sigma_max=200,
+                sigma_min=0.01,
+            ),
+            tokenizer=dict(
+                temporal_window=16,
+            ),
+            text_encoder_class="reason1p1_7B",
+            text_encoder_config=dict(
+                embedding_concat_strategy=str(EmbeddingConcatStrategy.FULL_CONCAT),
+                compute_online=True,
+                ckpt_path="s3://bucket/cosmos_reasoning1/sft_exp700/sft_exp721-1_qwen7b_tl_721_5vs5_s3_balanced_n32_resume_16k/checkpoints/iter_000016000/model/",
+            ),
+            use_lora=True,
+            lora_rank=24,
+            lora_alpha=24,
+            lora_target_modules="q_proj,k_proj,v_proj,output_proj,mlp.layer1,mlp.layer2",
+            init_lora_weights=True,
+        )
+    ),
+
 )
 
 cs = ConfigStore.instance()

@@ -333,3 +333,59 @@ class Video2WorldModel(Text2WorldModel):
             return raw_x0
 
         return x0_fn
+
+
+
+
+
+if __name__ == "__main__":
+
+    # config = 
+    from imaginaire.lazy_config import LazyCall as L
+
+    model = Predict2Video2WorldModel(config=Predict2Video2WorldModelConfig(
+            pipe_config=get_cosmos_predict2_video2world_pipeline(model_size="2B"),
+            model_manager_config=L(Predict2ModelManagerConfig)(
+                dit_path=get_cosmos_predict2_video2world_checkpoint(model_size="2B", resolution="720", fps=16),
+                text_encoder_path="",  # Do not load text encoder for training.
+            ),
+            fsdp_shard_size=-1,
+            high_sigma_ratio=0.05
+        ))
+    from cosmos_predict2.data.dataset_calvin import CalvinDataset
+    from torch.utils.data import DataLoader, DistributedSampler
+    def get_sampler(dataset) -> DistributedSampler:
+        return DistributedSampler(
+            dataset,
+            num_replicas=parallel_state.get_data_parallel_world_size(),
+            rank=parallel_state.get_data_parallel_rank(),
+            shuffle=True,
+            seed=0,
+        )
+    dataset = CalvinDataset(
+        dataset_dir="/home/jiangyuxin/data/calvin_debug_dataset"
+    )
+    dataloader_video_train = DataLoader(
+            dataset=dataset,
+            # sampler=get_sampler(dataset=dataset),
+            batch_size=1,
+            drop_last=True,
+            num_workers=8,
+            pin_memory=True,
+        )
+    for batch_idx, batch in enumerate(dataloader_video_train):
+    # Move batch to GPU
+        batch = {
+            k: (
+                v.to(device='cuda:0', dtype=torch.bfloat16) 
+                if v.dtype == torch.float32 
+                else v.to(device='cuda:0')  # Transfer to GPU but keep original dtype
+            )
+            if torch.is_tensor(v) 
+            else v 
+            for k, v in batch.items()
+        }
+        # batch = {k: v.to(device='cuda:0', dtype=torch.bfloat16) if torch.is_tensor(v) and v.dtype ==torch.float32 else v for k, v in batch.items()}
+        # batch = next(iter(dataloader_video_train))
+        model.training_step(batch, 0)
+    

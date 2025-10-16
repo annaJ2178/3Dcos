@@ -1079,3 +1079,106 @@ class DiffusionModel(ImaginaireModel):
         log.info(
             f"LoRA injection successful: {lora_params:,} trainable parameters out of {total_params:,} total ({100 * lora_params / total_params:.3f}%)"
         )
+
+
+
+    def read_and_process_pkl(
+        self,
+        input_path: str,
+        resolution: list[int],
+        num_video_frames: int,
+        pkl_path: str = '',
+        dataset_dir: str = '',
+        num_latent_conditional_frames: int = 2,
+        resize: bool = True,
+        choose_idx = 0,
+        return_anno = True,
+        whichset = "training"
+    ):  
+        if os.path.splitext(input_path)[1].lower() in _PKL_EXTENTIONS:
+            pkl_path = input_path
+        elif os.path.isdir(input_path):
+            dataset_dir = input_path
+        if dataset_dir != '':
+            ann_list = os.path.join(dataset_dir, f"{whichset}/lang_annotations/auto_lang_ann.npy")
+            annotations = np.load(ann_list, allow_pickle=True).item()
+            ann_dict = dict(zip(annotations["info"]["indx"], annotations["language"]["ann"]))
+            episode_idx = annotations["info"]["indx"] # [(s, e), (s, e), ...] len == len of episodes
+            json_file = os.path.join(dataset_dir, whichset, "episodes_mapping.json")
+            episode_paths = {}
+
+            with open(json_file, 'r') as f:
+                data= json.load(f)
+            # Convert keys back to tuples
+            for k, v in data.items():
+                episode_paths[eval(k)] = v
+            print(f"Loaded {len(episode_paths)} episodes from JSON")
+            if choose_idx == "random": choose_idx = np.random.randint(0, len(episode_idx))
+            episode_idx = episode_idx[choose_idx]
+            npz_paths = episode_paths[episode_idx]
+            ann = ann_dict[episode_idx]
+            selected_frames = []
+            total_frames = len(npz_paths)
+            start_frame = np.random.randint(0, total_frames // 2)
+            # start_frame = total_frames // 2
+            end_frame = total_frames - 1
+            if self.config.state_t == 2:
+                fps = 2
+            step_size = 16 // fps
+            for i in range(start_frame, end_frame+1, step_size):
+                data = np.load(npz_paths[i])
+                        
+                frames = data["rgb_static"] # 200,200,3
+                
+                # Handle single frame case
+                if len(frames.shape) == 3:  # [H, W, C]
+                    frames = frames[np.newaxis, ...]  # [1, H, W, C]
+                
+                selected_frames.append(frames)
+            
+            # Stack selected frames
+            frames = np.concatenate(selected_frames, axis=0)  # [sequence_length, H, W, C]
+            frames = frames.astype(np.uint8)
+
+            frames = torch.from_numpy(frames).permute(0, 3, 1, 2) # t, c, h, w
+            preprocess = T.Compose([
+                    ToTensorVideo(),
+                    Resize_Preprocess(tuple(resolution)),
+                    # T.Normalize(self.clip_mean, self.clip_std)
+                    ])
+            frames = preprocess(frames)
+            frames = torch.clamp(frames * 255.0, 0, 255).to(torch.uint8)
+            video_tensor = frames.permute(1, 0, 2, 3)  # Rearrange from [T, C, H, W] to [C, T, H, W]
+
+            # Add batch dimension and permute in one operation to final format
+            # [T, C, H, W] -> [1, C, T, H, W]
+            full_video = video_tensor.unsqueeze(0)
+
+        elif pkl_path != '':
+            data = np.load(input_path)
+                    
+            frames = data["rgb_static"] # 200,200,3
+            frames = frames[np.newaxis, ...]  # [1, H, W, C] 
+
+            frames = torch.from_numpy(frames).permute(0, 3, 1, 2) # t, c, h, w
+            preprocess = T.Compose([
+                    ToTensorVideo(),
+                    Resize_Preprocess(tuple(resolution)),
+                    # T.Normalize(self.clip_mean, self.clip_std)
+                    ])
+            frames = preprocess(frames)
+            # Set first frame and convert to uint8 (only the first frame needs conversion)
+            C, H, W = frames.shape[1], frames.shape[2], frames.shape[3]
+            
+            vid_input = torch.zeros((num_video_frames, C, H, W), dtype=torch.uint8, device=frames.device)
+            frames = torch.clamp(frames * 255.0, 0, 255).to(torch.uint8)
+            vid_input[0] = frames
+
+            # [T, C, H, W] -> [1, C, T, H, W]
+            full_video = vid_input.unsqueeze(0).permute(0, 2, 1, 3, 4)
+        if return_anno:
+             return full_video, ann
+        return full_video, None
+
+
+
