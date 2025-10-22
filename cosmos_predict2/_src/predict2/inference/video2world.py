@@ -58,6 +58,11 @@ import torch
 import torchvision
 from megatron.core import parallel_state
 from PIL import Image
+import numpy as np
+import json
+from torchvision import transforms as T
+
+from cosmos_predict2._src.predict2.datasets.local_datasets.dataset_utils import ResizePreprocess, ToTensorVideo
 
 from cosmos_predict2._src.imaginaire.flags import INTERNAL
 from cosmos_predict2._src.imaginaire.utils import distributed, log
@@ -68,6 +73,7 @@ from cosmos_predict2._src.predict2.utils.model_loader import load_model_from_che
 _IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"]
 _VIDEO_EXTENSIONS = [".mp4"]
 
+_PKL_EXTENTIONS = [".npy", ".pkl", ".npz"]
 _DEFAULT_NEGATIVE_PROMPT = "The video captures a series of frames showing ugly scenes, static with no motion, motion blur, over-saturation, shaky footage, low resolution, grainy texture, pixelated images, poorly lit areas, underexposed and overexposed scenes, poor color balance, washed out colors, choppy sequences, jerky movements, low frame rate, artifacting, color banding, unnatural transitions, outdated special effects, fake elements, unconvincing visuals, poorly edited content, jump cuts, visual noise, and flickering. Overall, the video is of poor quality."
 
 
@@ -232,6 +238,8 @@ def read_and_process_video(
     return full_video
 
 
+
+
 class Video2WorldInference:
     """
     Handles the Video2World inference process, including model loading, data preparation,
@@ -306,6 +314,109 @@ class Video2WorldInference:
 
         log.info(f"Initialized context parallel with size {self.context_parallel_size}")
         log.info(f"Current rank: {distributed.get_rank()}, World size: {distributed.get_world_size()}")
+
+    def read_and_process_pkl(
+        self,
+        input_path: str,
+        resolution: list[int],
+        num_video_frames: int,
+        pkl_path: str = '',
+        dataset_dir: str = '',
+        num_latent_conditional_frames: int = 2,
+        resize: bool = True,
+        choose_idx = 0,
+        return_anno = True,
+        whichset = "training"
+    ):  
+        if os.path.splitext(input_path)[1].lower() in _PKL_EXTENTIONS:
+            pkl_path = input_path
+        elif os.path.isdir(input_path):
+            dataset_dir = input_path
+        if dataset_dir != '':
+            ann_list = os.path.join(dataset_dir, f"{whichset}/lang_annotations/auto_lang_ann.npy")
+            annotations = np.load(ann_list, allow_pickle=True).item()
+            ann_dict = dict(zip(annotations["info"]["indx"], annotations["language"]["ann"]))
+            episode_idx = annotations["info"]["indx"] # [(s, e), (s, e), ...] len == len of episodes
+            json_file = os.path.join(dataset_dir, whichset, "episodes_mapping.json")
+            episode_paths = {}
+
+            with open(json_file, 'r') as f:
+                data= json.load(f)
+            # Convert keys back to tuples
+            for k, v in data.items():
+                episode_paths[eval(k)] = v
+            print(f"Loaded {len(episode_paths)} episodes from JSON")
+            if choose_idx == "random": choose_idx = np.random.randint(0, len(episode_idx))
+            episode_idx = episode_idx[choose_idx]
+            npz_paths = episode_paths[episode_idx]
+            ann = ann_dict[episode_idx]
+            selected_frames = []
+            total_frames = len(npz_paths)
+            start_frame = np.random.randint(0, total_frames // 2)
+            # start_frame = total_frames // 2
+            end_frame = total_frames - 1
+            if self.config.state_t == 2:
+                fps = 2
+            step_size = 16 // fps
+            for i in range(start_frame, end_frame+1, step_size):
+                data = np.load(npz_paths[i])
+                        
+                frames = data["rgb_static"] # 200,200,3
+                
+                # Handle single frame case
+                if len(frames.shape) == 3:  # [H, W, C]
+                    frames = frames[np.newaxis, ...]  # [1, H, W, C]
+                
+                selected_frames.append(frames)
+            
+            # Stack selected frames
+            frames = np.concatenate(selected_frames, axis=0)  # [sequence_length, H, W, C]
+            frames = frames.astype(np.uint8)
+
+            frames = torch.from_numpy(frames).permute(0, 3, 1, 2) # t, c, h, w
+            preprocess = T.Compose([
+                    ToTensorVideo(),
+                    ResizePreprocess(tuple(resolution)),
+                    # T.Normalize(self.clip_mean, self.clip_std)
+                    ])
+            frames = preprocess(frames)
+            frames = torch.clamp(frames * 255.0, 0, 255).to(torch.uint8)
+            video_tensor = frames.permute(1, 0, 2, 3)  # Rearrange from [T, C, H, W] to [C, T, H, W]
+
+            # Add batch dimension and permute in one operation to final format
+            # [T, C, H, W] -> [1, C, T, H, W]
+            full_video = video_tensor.unsqueeze(0)
+
+        elif pkl_path != '':
+            data = np.load(input_path)
+                    
+            frames = data["rgb_static"] # 200,200,3
+            frames = frames[np.newaxis, ...]  # [1, H, W, C] 
+
+            frames = torch.from_numpy(frames).permute(0, 3, 1, 2) # t, c, h, w
+            preprocess = T.Compose([
+                    ToTensorVideo(),
+                    ResizePreprocess(tuple(resolution)),
+                    # T.Normalize(self.clip_mean, self.clip_std)
+                    ])
+            frames = preprocess(frames)
+            # Set first frame and convert to uint8 (only the first frame needs conversion)
+            C, H, W = frames.shape[1], frames.shape[2], frames.shape[3]
+            
+            vid_input = torch.zeros((num_video_frames, C, H, W), dtype=torch.uint8, device=frames.device)
+            frames = torch.clamp(frames * 255.0, 0, 255).to(torch.uint8)
+            vid_input[0] = frames
+
+            # [T, C, H, W] -> [1, C, T, H, W]
+            full_video = vid_input.unsqueeze(0).permute(0, 2, 1, 3, 4)
+        if return_anno:
+             return full_video, ann
+        return full_video, None
+
+
+
+
+
 
     def _get_data_batch_input(
         self,
@@ -389,6 +500,11 @@ class Video2WorldInference:
         negative_prompt: str = _DEFAULT_NEGATIVE_PROMPT,
         camera: torch.Tensor | None = None,
         action: torch.Tensor | None = None,
+        return_gt: bool = True,
+        data_batch = None,
+        is_negative_prompt = False,
+        choose_idx = "random",
+        whichset = "training"
     ):
         """
         Generates a video based on an input image or video and text prompt.
@@ -426,50 +542,72 @@ class Video2WorldInference:
 
         # Get the correct number of frames needed by the model
         model_required_frames = self.model.tokenizer.get_pixel_num_frames(self.model.config.state_t)
+        if data_batch is None:
+            # Determine if input is image or video and process accordingly
+            if input_path is None or num_latent_conditional_frames == 0:
+                vid_input = torch.zeros(1, 3, model_required_frames, video_resolution[0], video_resolution[1]).to(
+                    torch.uint8
+                )
+            elif isinstance(input_path, str):
+                ext = os.path.splitext(input_path)[1].lower()
+                if ext in _PKL_EXTENTIONS or ext == '':
+                    vid_input, ann = self.read_and_process_pkl(
+                        input_path, video_resolution, num_video_frames, num_latent_conditional_frames, resize=True, choose_idx=choose_idx, whichset=whichset
+                    )
+                    if ann is not None:
+                        prompt = ann
+                    if vid_input.shape[2] > 1:
+                        gt = vid_input
+                        vid_input = gt[:, :, 0:1, :, :]
+                        if gt.shape[2] > 5:
+                            gt = gt[:, :, 0:5, :, :]
+                        elif gt.shape[2] < 5:
+                            gt = torch.cat([gt, gt[:, :, -1:, :, :].repeat(1, 1, 5-gt.shape[2], 1, 1)], dim=2)
+                    assert vid_input.shape[2] == 1
 
-        # Determine if input is image or video and process accordingly
-        if input_path is None or num_latent_conditional_frames == 0:
-            vid_input = torch.zeros(1, 3, model_required_frames, video_resolution[0], video_resolution[1]).to(
-                torch.uint8
+                if ext in _IMAGE_EXTENSIONS:
+                    log.info(f"Processing image input: {input_path}")
+                    vid_input = read_and_process_image(
+                        img_path=input_path,
+                        resolution=video_resolution,
+                        num_video_frames=model_required_frames,
+                        resize=True,
+                    )
+                elif ext in _VIDEO_EXTENSIONS:
+                    log.info(f"Processing video input: {input_path}")
+                    vid_input = read_and_process_video(
+                        video_path=input_path,
+                        resolution=video_resolution,
+                        num_video_frames=model_required_frames,
+                        num_latent_conditional_frames=num_latent_conditional_frames,
+                        resize=True,
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported file extension: {ext}. Supported extensions: {_IMAGE_EXTENSIONS + _VIDEO_EXTENSIONS}"
+                    )
+            elif isinstance(input_path, torch.Tensor):
+                vid_input = input_path
+        
+
+            # Prepare the data batch with text embeddings
+            data_batch = self._get_data_batch_input(
+                video=vid_input,
+                prompt=prompt,
+                camera=camera,
+                action=action,
+                num_conditional_frames=num_latent_conditional_frames,
+                negative_prompt=negative_prompt,
+                use_neg_prompt=True,
             )
-        elif isinstance(input_path, str):
-            ext = os.path.splitext(input_path)[1].lower()
-            if ext in _IMAGE_EXTENSIONS:
-                log.info(f"Processing image input: {input_path}")
-                vid_input = read_and_process_image(
-                    img_path=input_path,
-                    resolution=video_resolution,
-                    num_video_frames=model_required_frames,
-                    resize=True,
-                )
-            elif ext in _VIDEO_EXTENSIONS:
-                log.info(f"Processing video input: {input_path}")
-                vid_input = read_and_process_video(
-                    video_path=input_path,
-                    resolution=video_resolution,
-                    num_video_frames=model_required_frames,
-                    num_latent_conditional_frames=num_latent_conditional_frames,
-                    resize=True,
-                )
-            else:
-                raise ValueError(
-                    f"Unsupported file extension: {ext}. Supported extensions: {_IMAGE_EXTENSIONS + _VIDEO_EXTENSIONS}"
-                )
-        elif isinstance(input_path, torch.Tensor):
-            vid_input = input_path
         else:
-            raise ValueError(f"Unsupported input_path type: {type(input_path)}")
+            data_batch = data_batch
+            data_batch["video"] = data_batch["video"][:, :, 0:1, :, :]
 
-        # Prepare the data batch with text embeddings
-        data_batch = self._get_data_batch_input(
-            video=vid_input,
-            prompt=prompt,
-            camera=camera,
-            action=action,
-            num_conditional_frames=num_latent_conditional_frames,
-            negative_prompt=negative_prompt,
-            use_neg_prompt=True,
-        )
+
+        if return_gt == True:
+            raw_data, x0, condition = self.model.get_data_and_condition(data_batch)
+            gt = raw_data
 
         mem_bytes = torch.cuda.memory_allocated(device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
         log.info(f"GPU memory usage after getting data_batch: {mem_bytes / (1024**3):.2f} GB")
@@ -502,7 +640,8 @@ class Video2WorldInference:
         else:
             # Decode the latent sample into a video tensor
             video = self.model.decode(sample)
-
+        if return_gt:
+            return video, gt
         return video
 
     def cleanup(self):

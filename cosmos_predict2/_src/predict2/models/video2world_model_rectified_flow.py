@@ -99,7 +99,7 @@ class Video2WorldModelRectifiedFlow(Text2WorldModelRectifiedFlow):
             condition_video_mask = condition.condition_video_input_mask_B_C_T_H_W.repeat(1, C, 1, 1, 1).type_as(
                 xt_B_C_T_H_W
             )
-
+            # use gt frame + xt noise
             # Make the first few frames of x_t be the ground truth frames
             xt_B_C_T_H_W = condition_state_in_B_C_T_H_W * condition_video_mask + xt_B_C_T_H_W * (
                 1 - condition_video_mask

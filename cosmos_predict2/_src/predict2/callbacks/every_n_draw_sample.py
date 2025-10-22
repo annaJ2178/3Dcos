@@ -96,6 +96,7 @@ class EveryNDrawSample(EveryN):
         use_negative_prompt: bool = False,
         prompt_type: str = "t5_xxl",
         fps: int = 16,
+        return_gt = True
     ):
         # s3: # files: min(n_sample_to_save, data instance)  # per file: min(batch_size, n_viz_sample)
         # wandb: 1 file, # per file: min(batch_size, n_viz_sample)
@@ -114,6 +115,7 @@ class EveryNDrawSample(EveryN):
         self.num_sampling_step = num_sampling_step
         self.rank = distributed.get_rank()
         self.fps = fps
+        self.return_gt = return_gt
 
     def on_train_start(self, model: ImaginaireModel, iteration: int = 0) -> None:
         config_job = self.config.job
@@ -316,7 +318,7 @@ class EveryNDrawSample(EveryN):
                 sample = model.decode(sample)
             to_show.append(sample.float().cpu())
 
-        to_show.append(raw_data.float().cpu())
+        to_show.append(raw_data.float().cpu()) # torch.Size([6, 3, 5, 704, 1280]) n b c t h w
 
         base_fp_wo_ext = f"{tag}_ReplicateID{self.data_parallel_id:04d}_Sample_Iter{iteration:09d}"
 
@@ -329,7 +331,8 @@ class EveryNDrawSample(EveryN):
     def run_save(self, to_show, batch_size, base_fp_wo_ext) -> Optional[str]:
         to_show = (1.0 + torch.stack(to_show, dim=0).clamp(-1, 1)) / 2.0  # [n, b, c, t, h, w]
         is_single_frame = to_show.shape[3] == 1
-        n_viz_sample = min(self.n_viz_sample, batch_size)
+        # n_viz_sample = min(self.n_viz_sample, batch_size)
+        n_viz_sample = batch_size
 
         # ! we only save first n_sample_to_save video!
         if self.save_s3 and self.data_parallel_id < self.n_sample_to_save:
@@ -341,6 +344,30 @@ class EveryNDrawSample(EveryN):
 
         file_base_fp = f"{base_fp_wo_ext}_resize.jpg"
         local_path = f"{self.local_dir}/{file_base_fp}"
+
+        if self.rank == 0 and wandb.run.disabled is True:
+            local_path = f"{self.local_dir}/{base_fp_wo_ext}"
+            save_img_or_video(
+                rearrange(to_show, "n b c t h w -> c (b t) (n h) w"),
+                local_path,
+                fps=self.fps,
+            )
+
+            for batch_idx in range(to_show.shape[1]):
+                video_to_save = rearrange(
+                    to_show[:, batch_idx],  # select batch_idx, shape: (n, c, t, h, w)
+                    "n c t h w -> c t (n h) w"
+                )
+                
+                batch_path = f"{self.local_dir}/{base_fp_wo_ext}_{batch_idx}"
+                
+                save_img_or_video(
+                    video_to_save,
+                    batch_path,
+                    fps=self.fps,
+                )
+
+            return None
 
         if self.rank == 0 and wandb.run:
             if is_single_frame:  # image case
@@ -371,4 +398,6 @@ class EveryNDrawSample(EveryN):
                 )
 
             return local_path
+
+
         return None

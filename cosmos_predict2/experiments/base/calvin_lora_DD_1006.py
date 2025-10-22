@@ -22,31 +22,54 @@ from cosmos_predict2._src.predict2.datasets.local_datasets.dataset_video import 
     get_generic_dataloader,
     get_sampler,
 )
+from cosmos_predict2._src.predict2.datasets.local_datasets.dataset_calvin import (
+    CalvinDataset,
+)
 from cosmos_predict2.config import MODEL_CHECKPOINTS, ModelKey
 
 DEFAULT_CHECKPOINT = MODEL_CHECKPOINTS[ModelKey(post_trained=False)]
 
 
-# GR1 dataset and dataloader
-example_video_dataset_gr1 = L(VideoDataset)(
-    dataset_dir="datasets/benchmark_train/gr1",
+example_video_dataset = L(CalvinDataset)(
+    dataset_dir="/nas/jiangyuxin/task_D_D",
+    # dataset_dir="/home/jiangyuxin/data/calvin_debug_dataset",
     num_frames=93,
-    video_size=(432, 768),
+    video_size=(704, 1280),
+    fps=2,
+    whichset="training"
 )
+
+# example_val_video_dataset = L(CalvinDataset)(
+#     # dataset_dir="/nas/jiangyuxin/task_D_D",
+#     dataset_dir="/home/jiangyuxin/data/calvin_debug_dataset",
+#     num_frames=93,
+#     video_size=(704, 1280),
+#     fps=2,
+#     whichset="validation"
+# )
 
 # Create DataLoader with distributed sampler
 dataloader_train_gr1 = L(get_generic_dataloader)(
-    dataset=example_video_dataset_gr1,
-    sampler=L(get_sampler)(dataset=example_video_dataset_gr1),
-    batch_size=1,
+    dataset=example_video_dataset,
+    sampler=L(get_sampler)(dataset=example_video_dataset),
+    batch_size=2,
     drop_last=True,
     num_workers=4,
     pin_memory=True,
 )
 
+# dataloader_val_gr1 = L(get_generic_dataloader)(
+#     dataset=example_val_video_dataset,
+#     sampler=L(get_sampler)(dataset=example_val_video_dataset),
+#     batch_size=2,
+#     drop_last=True,
+#     num_workers=4,
+#     pin_memory=True,
+# )
+
 # Video2World post-training configuration for 2B model
 # torchrun --nproc_per_node=1 --master_port=12341 -m scripts.train --config=cosmos_predict2/_src/predict2/configs/video2world/config.py -- experiment=predict2_video2world_training_2b_groot_gr1_480
-predict2_video2world_training_2b_groot_gr1_480 = dict(
+predict2_video2world_training_2b_calvin = dict(
     defaults=[
         f"/experiment/{DEFAULT_CHECKPOINT.experiment}",
         {"override /data_train": "mock"},
@@ -54,9 +77,9 @@ predict2_video2world_training_2b_groot_gr1_480 = dict(
         "_self_",
     ],
     dataloader_train=dataloader_train_gr1,
+    # dataloader_val=dataloader_val_gr1,
     checkpoint=dict(
-        save_iter=200,
-        # pyrefly: ignore  # missing-attribute
+        save_iter=1000,
         load_path=get_checkpoint_path(DEFAULT_CHECKPOINT.s3.uri),
         load_from_object_store=dict(
             enabled=False,
@@ -68,21 +91,24 @@ predict2_video2world_training_2b_groot_gr1_480 = dict(
     job=dict(
         project="cosmos_predict_v2p5",
         group="video2world",
-        name="2b_groot_gr1_480",
+        name="2b_calvin_5000",
     ),
     optimizer=dict(
-        lr=2 ** (-14.5),
+        lr=2 ** (-10.5),
         weight_decay=0.001,
     ),
     scheduler=dict(
         f_max=[0.5],
         f_min=[0.2],
-        warm_up_steps=[1_000],
+        warm_up_steps=[0],
+        # warm_up_steps=[1_000],
         cycle_lengths=[100000],
     ),
     trainer=dict(
-        logging_iter=100,
-        max_iter=1000,
+        run_validation=False,
+        validation_iter=1,
+        logging_iter=1,
+        max_iter=100000,
         callbacks=dict(
             heart_beat=dict(
                 save_s3=False,
@@ -95,11 +121,12 @@ predict2_video2world_training_2b_groot_gr1_480 = dict(
                 save_s3=False,
             ),
             every_n_sample_reg=dict(
-                every_n=200,
+                every_n=1,
+                fps=2,
                 save_s3=False,
             ),
             every_n_sample_ema=dict(
-                every_n=200,
+                every_n=1000,
                 save_s3=False,
             ),
             wandb=dict(
@@ -107,6 +134,9 @@ predict2_video2world_training_2b_groot_gr1_480 = dict(
             ),
             wandb_10x=dict(
                 save_s3=False,
+            ),
+            tensorboard=dict(
+                every_n=1
             ),
             dataloader_speed=dict(
                 save_s3=False,
@@ -118,9 +148,9 @@ predict2_video2world_training_2b_groot_gr1_480 = dict(
     ),
     model=dict(
         config=dict(
-            # min_num_conditional_frames=0,
-            # max_num_conditional_frames=2,
-            # conditional_frames_probs={0: 0.5, 1: 0.25, 2: 0.25},
+            min_num_conditional_frames=1,
+            max_num_conditional_frames=1,
+            conditional_frames_probs={0: 0.1, 1: 0.9, 2:0.0},
             # loss_scale=10.0,
             # adjust_video_noise=False,
             # scaling="rectified_flow",
@@ -133,32 +163,38 @@ predict2_video2world_training_2b_groot_gr1_480 = dict(
             # sigma_data=1.0,
             # high_sigma_ratio=0.05,
             # rectified_flow_loss_weight_uniform=False,
-            net=dict(
-                rope_enable_fps_modulation=False,
-                rope_h_extrapolation_ratio=3.0,
-                rope_w_extrapolation_ratio=3.0,
-                rope_t_extrapolation_ratio=24.0 / 24,
-                sac_config=dict(
-                    mode="predict2_2b_720_aggressive",
-                ),
-                use_crossattn_projection=True,
-                crossattn_proj_in_channels=100352,
-                crossattn_emb_channels=1024,
-            ),
-            conditioner=dict(
-                use_video_condition=dict(
-                    dropout_rate=0.0,
-                ),
-                text=dict(
-                    dropout_rate=0.2,
-                    use_empty_string=False,
-                ),
-            ),
+            
+            
+            
+            # net=dict(
+            #     rope_enable_fps_modulation=False,
+            #     rope_h_extrapolation_ratio=3.0,
+            #     rope_w_extrapolation_ratio=3.0,
+            #     rope_t_extrapolation_ratio=24.0 / 24,
+            #     sac_config=dict(
+            #         mode="predict2_2b_720_aggressive",
+            #     ),
+            #     use_crossattn_projection=True,
+            #     crossattn_proj_in_channels=100352,
+            #     crossattn_emb_channels=1024,
+            # ),
+            # conditioner=dict(
+            #     use_video_condition=dict(
+            #         dropout_rate=0.0,
+            #     ),
+            #     text=dict(
+            #         dropout_rate=0.2,
+            #         use_empty_string=False,
+            #     ),
+            # ),
 
-            tokenizer=dict(
-                temporal_window=16,
-            ),
-            text_encoder_class="reason1p1_7B",
+            # tokenizer=dict(
+            #     temporal_window=16,
+            # ),
+            # text_encoder_class="reason1p1_7B",
+            
+            
+            
             # text_encoder_config=dict(
             #     embedding_concat_strategy=str(EmbeddingConcatStrategy.FULL_CONCAT),
             #     compute_online=True,
@@ -167,8 +203,8 @@ predict2_video2world_training_2b_groot_gr1_480 = dict(
             
             # -----------------------lora config-----------------------------
             use_lora=True,
-            lora_rank=24,
-            lora_alpha=24,
+            lora_rank=32,
+            lora_alpha=32,
             lora_target_modules="q_proj,k_proj,v_proj,output_proj,mlp.layer1,mlp.layer2",
             init_lora_weights=True,
         )
@@ -179,7 +215,7 @@ predict2_video2world_training_2b_groot_gr1_480 = dict(
 cs = ConfigStore.instance()
 
 for _item in [
-    predict2_video2world_training_2b_groot_gr1_480,
+    predict2_video2world_training_2b_calvin,
 ]:
     # Get the experiment name from the global variable
     experiment_name = [name.lower() for name, value in globals().items() if value is _item][0]

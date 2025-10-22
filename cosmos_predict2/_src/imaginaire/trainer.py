@@ -17,6 +17,8 @@ import functools
 import inspect
 import os
 import signal
+from contextlib import nullcontext
+from functools import partial
 
 import torch
 import torch.distributed as dist
@@ -304,6 +306,24 @@ class ImaginaireTrainer:
                 ):
                     loss_scaled = grad_scaler.scale(loss / self.config.trainer.grad_accum_iter)
                     loss_scaled.backward()
+                    # # Verify LoRA parameters are actually trainable
+                    # lora_params = [name for name, param in model_ddp.named_parameters() if 'lora' in name]
+
+                    # # DEBUG: Check gradient computation
+                    # print("=== After backward() ===")
+                    # for name in lora_params[:5]:
+                    #     param = dict(model_ddp.named_parameters())[name]
+                    #     if param.requires_grad:
+                    #         if param.grad is None:
+                    #             print(f"✗ {name}: NO GRADIENT (grad is None)")
+                    #         else:
+                    #             grad_norm = param.grad.norm().item()
+                    #             if grad_norm < 1e-8:
+                    #                 print(f"✗ {name}: ZERO GRADIENT (norm: {grad_norm})")
+                    #             else:
+                    #                 print(f"✓ {name}: HAS GRADIENT (norm: {grad_norm})")
+
+
                     if self.config.trainer.distributed_parallelism == "ddp":
                         model_ddp.module.on_after_backward()
                     else:
@@ -318,9 +338,18 @@ class ImaginaireTrainer:
                     self.callbacks.on_before_optimizer_step(
                         model_ddp, optimizer, scheduler, grad_scaler, iteration=iteration
                     )
+                    # param_before = model_ddp.net.blocks[1].self_attn.k_proj.lora_A.default.weight.clone()
                     grad_scaler.step(optimizer)
                     grad_scaler.update()
                     scheduler.step()
+                    # param_after = model_ddp.net.blocks[1].self_attn.k_proj.lora_A.default.weight
+                    # has_changed = not torch.allclose(param_before, param_after)
+                    # print(f"LoRA parameter changed: {has_changed}")
+
+                    # # Measure the change
+                    # change_magnitude = torch.norm(param_after - param_before)
+                    # print(f"Change magnitude: {change_magnitude}")
+
                     self.callbacks.on_before_zero_grad(model_ddp, optimizer, scheduler, iteration=iteration)
                     if self.config.trainer.distributed_parallelism == "ddp":
                         model_ddp.module.on_before_zero_grad(optimizer, scheduler, iteration=iteration)
@@ -342,7 +371,12 @@ class ImaginaireTrainer:
         self.callbacks.on_validation_start(model, dataloader_val, iteration=iteration)
         model.eval()
         # Evaluate on the full validation set.
-        with ema.ema_scope(model, enabled=model.config.ema.enabled):
+        # context = partial(model.ema_scope, "every_n_sampling")
+        if model.config.ema.enabled:
+            context = partial(model.ema_scope, "every_n_sampling")
+        else:
+            context = nullcontext
+        with context():
             for val_iter, data_batch in enumerate(dataloader_val):
                 if self.config.trainer.max_val_iter is not None and val_iter >= self.config.trainer.max_val_iter:
                     break

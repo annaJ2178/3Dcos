@@ -22,14 +22,18 @@ from cosmos_predict2._src.predict2.datasets.local_datasets.dataset_video import 
     get_generic_dataloader,
     get_sampler,
 )
+from cosmos_predict2._src.predict2.datasets.local_datasets.dataset_calvin import (
+    CalvinDataset,
+)
 from cosmos_predict2.config import MODEL_CHECKPOINTS, ModelKey
 
 DEFAULT_CHECKPOINT = MODEL_CHECKPOINTS[ModelKey(post_trained=False)]
 
 
 # Cosmos-NeMo-Assets video2world dataset and dataloader
-example_video_dataset_cosmos_nemo_assets = L(VideoDataset)(
-    dataset_dir="datasets/cosmos_nemo_assets",
+example_video_dataset_cosmos_nemo_assets = L(CalvinDataset)(
+    dataset_dir="/nas/jiangyuxin/task_D_D",
+    # /home/jiangyuxin/data/calvin_debug_dataset
     num_frames=93,
     video_size=(704, 1280),
 )

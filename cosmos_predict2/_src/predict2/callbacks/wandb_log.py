@@ -23,11 +23,13 @@ import torch
 import torch.distributed as dist
 import torch.utils.data
 import wandb
+from torch.utils.tensorboard import SummaryWriter
 
 from cosmos_predict2._src.imaginaire.model import ImaginaireModel
 from cosmos_predict2._src.imaginaire.utils import distributed, log, misc, wandb_util
 from cosmos_predict2._src.imaginaire.utils.callback import Callback
 from cosmos_predict2._src.imaginaire.utils.easy_io import easy_io
+from cosmos_predict2._src.imaginaire.callbacks.every_n import EveryN
 
 
 @dataclass
@@ -240,3 +242,137 @@ class WandbCallback(Callback):
 
     def on_train_end(self, model: ImaginaireModel, iteration: int = 0) -> None:
         wandb.finish()
+
+
+
+class TensorboardCallback(EveryN):
+    """
+    This callback is used to log the loss, average loss over logging_iter_multipler, and unstable counts of image and video to wandb.
+    """
+
+    def __init__(
+        self,
+        every_n: int,
+        step_size: int = 1,
+        logging_iter_multipler: int = 1,
+        save_logging_iter_multipler: int = 1,
+        save_s3: bool = False,
+    ) -> None:
+        super().__init__(every_n, step_size)
+        self.train_image_log = _LossRecord()
+        self.train_video_log = _LossRecord()
+        self.final_loss_log = _LossRecord()
+
+        self.img_unstable_count = torch.zeros(1, device="cuda")
+        self.video_unstable_count = torch.zeros(1, device="cuda")
+
+        self.logging_iter_multipler = logging_iter_multipler
+        self.save_logging_iter_multipler = save_logging_iter_multipler
+        assert self.logging_iter_multipler > 0, "logging_iter_multipler should be greater than 0"
+        # self.save_s3 = save_s3
+
+    @distributed.rank0_only
+    def on_train_start(self, model: ImaginaireModel, iteration: int = 0) -> None:
+        self.writer = SummaryWriter(self.config.job.path_local)
+
+    def on_before_optimizer_step(
+        self,
+        model_ddp: distributed.DistributedDataParallel,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
+        grad_scaler: torch.amp.GradScaler,
+        iteration: int = 0,
+    ) -> None:  # Log the curent learning rate.
+        if iteration % self.config.trainer.logging_iter == 0 and distributed.is_rank0():
+            for i, param_group in enumerate(optimizer.param_groups):
+                self.writer.add_scalar(f"optim/lr_{i}", param_group["lr"], global_step=iteration)
+                self.writer.add_scalar(f"optim/weight_decay_{i}", param_group["weight_decay"], global_step=iteration)
+
+    @torch.no_grad()
+    def every_n_impl(
+        self,
+        trainer,
+        model: ImaginaireModel,
+        data_batch: dict[str, torch.Tensor],
+        output_batch: dict[str, torch.Tensor],
+        loss: torch.Tensor,
+        iteration: int = 0,
+    ) -> None:
+        skip_update_due_to_unstable_loss = torch.isnan(loss) or torch.isinf(loss)
+
+        if not skip_update_due_to_unstable_loss:
+            if model.is_image_batch(data_batch):
+                self.train_image_log.loss += loss.detach().float()
+                self.train_image_log.iter_count += 1
+                self.train_image_log.edm_loss += output_batch["edm_loss"].detach().float()
+            else:
+                self.train_video_log.loss += loss.detach().float()
+                self.train_video_log.iter_count += 1
+                self.train_video_log.edm_loss += output_batch["edm_loss"].detach().float()
+
+            self.final_loss_log.loss += loss.detach().float()
+            self.final_loss_log.iter_count += 1
+            self.final_loss_log.edm_loss += output_batch["edm_loss"].detach().float()
+        else:
+            if model.is_image_batch(data_batch):
+                self.img_unstable_count += 1
+            else:
+                self.video_unstable_count += 1
+
+        if iteration % (self.config.trainer.logging_iter * self.logging_iter_multipler) == 0:
+            avg_image_loss, avg_image_edm_loss = self.train_image_log.get_stat()
+            avg_video_loss, avg_video_edm_loss = self.train_video_log.get_stat()
+            avg_final_loss, avg_final_edm_loss = self.final_loss_log.get_stat()
+
+            dist.all_reduce(self.img_unstable_count, op=dist.ReduceOp.SUM)
+            dist.all_reduce(self.video_unstable_count, op=dist.ReduceOp.SUM)
+
+            if distributed.is_rank0():
+                self.writer.add_scalar("train/image_loss", avg_image_loss, iteration)
+                self.writer.add_scalar("train/image_edm_loss", avg_image_edm_loss, iteration)
+                self.writer.add_scalar("train/video_loss", avg_video_loss, iteration)
+                self.writer.add_scalar("train/video_edm_loss", avg_video_edm_loss, iteration)
+                self.writer.add_scalar("train/loss", avg_final_loss, iteration)
+                self.writer.add_scalar("train/edm_loss", avg_final_edm_loss, iteration)
+                self.writer.add_scalar("train/img_unstable_count", self.img_unstable_count.item(), iteration)
+                self.writer.add_scalar("train/video_unstable_count", self.video_unstable_count.item(), iteration)
+
+            self.img_unstable_count.zero_()
+            self.video_unstable_count.zero_()
+            if self.logging_iter_multipler == 1:
+                self.trainer.training_timer.reset()
+
+    def on_validation_start(
+        self, model: ImaginaireModel, dataloader_val: torch.utils.data.DataLoader, iteration: int = 0
+    ) -> None:
+        # Cache for collecting data/output batches.
+        self._val_cache: dict[str, Any] = dict(
+            data_batches=[],
+            output_batches=[],
+            loss=torch.tensor(0.0, device="cuda"),
+            sample_size=torch.tensor(0, device="cuda"),
+        )
+
+    def on_validation_step_end(
+        self,
+        model: ImaginaireModel,
+        data_batch: dict[str, torch.Tensor],
+        output_batch: dict[str, torch.Tensor],
+        loss: torch.Tensor,
+        iteration: int = 0,
+    ) -> None:  # Collect the validation batch and aggregate the overall loss.
+        # Collect the validation batch and aggregate the overall loss.
+        batch_size = misc.get_data_batch_size(data_batch)
+        self._val_cache["loss"] += loss * batch_size
+        self._val_cache["sample_size"] += batch_size
+
+    def on_validation_end(self, model: ImaginaireModel, iteration: int = 0) -> None:
+        # Compute the average validation loss across all devices.
+        dist.all_reduce(self._val_cache["loss"], op=dist.ReduceOp.SUM)
+        dist.all_reduce(self._val_cache["sample_size"], op=dist.ReduceOp.SUM)
+        loss = self._val_cache["loss"].item() / self._val_cache["sample_size"]
+
+        if distributed.is_rank0():
+            self.writer.add_scalar("val/loss", loss, iteration)
+    def on_train_end(self, model: ImaginaireModel, iteration: int = 0) -> None:
+        self.writer.close()

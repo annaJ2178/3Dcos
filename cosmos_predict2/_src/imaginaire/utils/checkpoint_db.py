@@ -306,7 +306,7 @@ _register_checkpoint(
         if EXPERIMENTAL_CHECKPOINTS
         else CheckpointFileHf(
             repository="nvidia/Cosmos-Predict2.5-2B",
-            revision="15a82a2ec231bc318692aa0456a36537c806e7d4",
+            revision="1a7f55340992562b20e81a93238e6722345c855d",
             filename="base/pre-trained/d20b7120-df3e-4911-919d-db6e08bad31c_ema_bf16.pt",
         ),
     ),
@@ -332,7 +332,7 @@ _register_checkpoint(
         if EXPERIMENTAL_CHECKPOINTS
         else CheckpointFileHf(
             repository="nvidia/Cosmos-Predict2.5-2B",
-            revision="15a82a2ec231bc318692aa0456a36537c806e7d4",
+            revision="1a7f55340992562b20e81a93238e6722345c855d",
             filename="base/post-trained/81edfebe-bd6a-4039-8c1d-737df1a790bf_ema_bf16.pt",
         ),
     ),
@@ -360,7 +360,7 @@ _register_checkpoint(
         if EXPERIMENTAL_CHECKPOINTS
         else CheckpointFileHf(
             repository="nvidia/Cosmos-Predict2.5-2B",
-            revision="15a82a2ec231bc318692aa0456a36537c806e7d4",
+            revision="1a7f55340992562b20e81a93238e6722345c855d",
             filename="auto/multiview/6b9d7548-33bb-4517-b5e8-60caf47edba7_ema_bf16.pt",
         ),
     ),

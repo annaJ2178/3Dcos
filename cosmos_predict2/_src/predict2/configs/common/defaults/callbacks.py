@@ -23,7 +23,7 @@ from cosmos_predict2._src.predict2.callbacks.device_monitor import DeviceMonitor
 from cosmos_predict2._src.predict2.callbacks.grad_clip import GradClip
 from cosmos_predict2._src.predict2.callbacks.heart_beat import HeartBeat
 from cosmos_predict2._src.predict2.callbacks.iter_speed import IterSpeed
-from cosmos_predict2._src.predict2.callbacks.wandb_log import WandbCallback
+from cosmos_predict2._src.predict2.callbacks.wandb_log import WandbCallback, TensorboardCallback
 
 BASIC_CALLBACKS = dict(
     grad_clip=L(GradClip)(),
@@ -61,6 +61,11 @@ WANDB_CALLBACK = dict(
         logging_iter_multipler=10,
         save_logging_iter_multipler=1,
         save_s3="${upload_reproducible_setup}",
+    ),
+    tensorboard=L(TensorboardCallback)(
+        save_s3="${upload_reproducible_setup}",
+        logging_iter_multipler=1,
+        save_logging_iter_multipler=10,
     ),
 )
 

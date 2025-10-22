@@ -28,9 +28,8 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torchvision import transforms as T
 
-from cosmos_predict2.data.dataset_utils import Resize_Preprocess, ToTensorVideo
-from imaginaire.auxiliary.text_encoder import CosmosTextEncoderConfig
-from imaginaire.utils import log
+from cosmos_predict2._src.predict2.datasets.local_datasets.dataset_utils import ResizePreprocess, ToTensorVideo
+from cosmos_predict2._src.imaginaire.utils import log
 
 """
 Test the dataset with the following command:
@@ -110,12 +109,12 @@ class CalvinDataset(Dataset):
         self.sequence_length = num_frames
         self.final_frames = final_frames
         # frames_dir = dataset_dir
-        self.t5_dir = os.path.join(self.dataset_dir, "t5_xxl")
+        # self.t5_dir = os.path.join(self.dataset_dir, "t5_xxl")
 
         self.whichset = whichset
         ann_list = os.path.join(self.dataset_dir, f"{whichset}/lang_annotations/auto_lang_ann.npy")
         annotations = np.load(ann_list, allow_pickle=True).item()
-        ann_dict = dict(zip(annotations["info"]["indx"], annotations["language"]["ann"]))
+        self.ann_dict = dict(zip(annotations["info"]["indx"], annotations["language"]["ann"]))
         self.episode_idx = annotations["info"]["indx"] # [(s, e), (s, e), ...] len == len of episodes
         self.json_file = os.path.join(dataset_dir, whichset, "episodes_mapping.json")
 
@@ -129,7 +128,8 @@ class CalvinDataset(Dataset):
                 print(f"Saved to {self.json_file}")
            
         log.info(f"Found {len(self.episode_idx)} episodes with ?? total NPZ files")
-        repeat = True
+        if len(self.episode_idx) < 20: repeat = True
+        else: repeat = False
         if repeat is True:
             self.episode_idx = self.episode_idx * 100
             # breakpoint()
@@ -142,7 +142,7 @@ class CalvinDataset(Dataset):
         
         self.preprocess = T.Compose([
             ToTensorVideo(),
-            Resize_Preprocess(tuple(video_size)),
+            ResizePreprocess(tuple(video_size)),
             # T.Normalize(self.clip_mean, self.clip_std)
             ])
         
@@ -228,7 +228,6 @@ class CalvinDataset(Dataset):
         new_range = new_range[start_frame:end_frame]
         return video, new_range
 
-
     def pad_sample(self, video: torch.Tensor, expected_length: int, original_length: int, new_range, pad_last=True) -> torch.Tensor:
         # sample consecutive video frames to match expected_length
         # original_length = video.shape[2]
@@ -313,7 +312,6 @@ class CalvinDataset(Dataset):
             frames = np.concatenate([frames, final_d], axis=0)
             selected_index.append(int(npz_paths[end_frame].split('_')[-1].split('.')[0]))
         return frames, selected_index
-    
 
     def _get_frames(self, npz_paths: list[str], index_range: tuple) -> tuple[torch.Tensor, float]:
         """Load and preprocess frames from a list of NPZ files.
@@ -356,15 +354,13 @@ class CalvinDataset(Dataset):
                 video, new_range = self.pad_sample(video, self.final_frames, video.shape[0], new_range)
             video = video.permute(1, 0, 2, 3)  # [T, C, H, W] -> [C, T, H, W] is tensor after norm
             videos[self.frames_key] = video
-            # fps_dict[camera_name] = fps
             
             # Use first camera for metadata (or specify a primary camera)
-            primary_camera = list(videos.keys())[0]
-            primary_video = videos[primary_camera]
+            # primary_camera = list(videos.keys())[0]
+            # primary_video = videos[primary_camera]
             # primary_fps = fps_dict[primary_camera]
             
-            # Get T5 embedding path (you may need to adjust this based on your structure)
-            # episode_name = os.path.basename(os.path.dirname(list(episode[primary_camera])[0]))
+
             t5_embedding_path = os.path.join(self.dataset_dir , "t5_xxl", f"0{episode_idx[0]}_0{episode_idx[1]}.pt")
             
             data["video"] = video
@@ -372,35 +368,10 @@ class CalvinDataset(Dataset):
                 "video_path": torch.tensor(new_range).unsqueeze(dim=0),
                 "t5_embedding_path": t5_embedding_path,
             }
+            data["ai_caption"] = self.ann_dict[episode_idx]
 
-            _, _, h, w = primary_video.shape
+            _, _, h, w = video.shape
 
-            # Load T5 embeddings [len_of_token, 1024]
-            with open(t5_embedding_path, "rb") as f:
-                t5_embedding_raw = pickle.load(f)
-                assert isinstance(t5_embedding_raw, list)
-                assert len(t5_embedding_raw) == 1
-                t5_embedding = t5_embedding_raw[0]  # [n_tokens, CosmosTextEncoderConfig.EMBED_DIM]
-                assert isinstance(t5_embedding, np.ndarray)
-                assert len(t5_embedding.shape) == 2
-            
-            n_tokens = t5_embedding.shape[0]
-            if n_tokens < CosmosTextEncoderConfig.NUM_TOKENS:
-                t5_embedding = np.concatenate(
-                    [
-                        t5_embedding,
-                        np.zeros(
-                            (CosmosTextEncoderConfig.NUM_TOKENS - n_tokens, CosmosTextEncoderConfig.EMBED_DIM),
-                            dtype=np.float32,
-                        ),
-                    ],
-                    axis=0,
-                )
-            t5_text_mask = torch.zeros(CosmosTextEncoderConfig.NUM_TOKENS, dtype=torch.int64)
-            t5_text_mask[:n_tokens] = 1
-
-            data["t5_text_embeddings"] = torch.from_numpy(t5_embedding)
-            data["t5_text_mask"] = t5_text_mask
             data["fps"] = self.fps
             data["image_size"] = torch.tensor([h, w, h, w])
             data["num_frames"] = video.shape[1]
